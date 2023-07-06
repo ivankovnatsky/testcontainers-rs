@@ -28,14 +28,20 @@ impl Cli {
         let image = image.into();
 
         if let Some(network) = image.network() {
-            if self.inner.create_network_if_not_exists(network) {
-                let mut guard = self
-                    .inner
-                    .created_networks
-                    .write()
-                    .expect("failed to lock RwLock");
-
-                guard.push(network.to_owned());
+            match self.inner.create_network_if_not_exists(network) {
+                Ok(created) => {
+                    if created {
+                        let mut guard = self
+                            .inner
+                            .created_networks
+                            .write()
+                            .expect("failed to lock RwLock");
+                        guard.push(network.to_owned());
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to create network: {:?}", e);
+                }
             }
         }
 
@@ -43,9 +49,23 @@ impl Cli {
 
         log::debug!("Executing command: {:?}", command);
 
-        let output = command.output().expect("Failed to execute docker command");
+        let output = match command.output() {
+            Ok(output) => {
+                if !output.status.success() {
+                    log::error!("Failed to start container.");
+                    log::error!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+                    log::error!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+                    panic!("Failed to start container");
+                }
+                log::debug!("docker run command output: {:?}", output);
+                output
+            }
+            Err(e) => {
+                log::error!("Failed to execute Docker command: {}", e);
+                panic!("Failed to execute Docker command");
+            }
+        };
 
-        assert!(output.status.success(), "failed to start container");
         let container_id = String::from_utf8(output.stdout)
             .expect("output is not valid utf8")
             .trim()
@@ -198,18 +218,29 @@ impl Client {
         command
     }
 
-    fn create_network_if_not_exists(&self, name: &str) -> bool {
+    fn create_network_if_not_exists(&self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if self.network_exists(name) {
-            return false;
+            return Ok(false);
         }
 
         let mut docker = self.command();
         docker.args(["network", "create", name]);
 
-        let output = docker.output().expect("failed to create docker network");
-        assert!(output.status.success(), "failed to create docker network");
+        let output = docker.output()?;
 
-        true
+        if !output.status.success() {
+            log::error!("Failed to create docker network.");
+            log::error!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+            log::error!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to create docker network",
+            )));
+        }
+
+        log::debug!("docker network create output: {:?}", output);
+
+        Ok(true)
     }
 
     fn network_exists(&self, name: &str) -> bool {
